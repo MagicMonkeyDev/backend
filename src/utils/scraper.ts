@@ -1,13 +1,13 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import type { ScrapeResult, TwitterProfile } from '../types.js';
-import { setTimeout } from 'timers/promises'; 
+import { setTimeout } from 'timers/promises';
 
 const NITTER_INSTANCES = [
-  'https://nitter.net',
-  'https://nitter.1d4.us',
-  'https://nitter.kavin.rocks',
-  'https://nitter.it'
+  'https://nitter.catsarch.com',
+  'https://nitter.in.projectsegfau.lt',
+  'https://nitter.poast.org',
+  'https://nitter.woodland.cafe'
 ];
 
 async function fetchWithRetry(url: string, maxRetries = 3) {
@@ -18,13 +18,20 @@ async function fetchWithRetry(url: string, maxRetries = 3) {
       const response = await axios.get(url, {
         signal: controller.signal,
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ' +
-                       'Chrome/120.0.0.0 Safari/537.36',
+          'User-Agent': 'Mozilla/5.0 (compatible; TwitterBot/1.0)',
           'Accept': 'text/html',
           'Accept-Language': 'en-US,en;q=0.9',
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache'
         },
         timeout: 10000
       });
+      
+      // Verify we got valid HTML with expected elements
+      if (!response.data.includes('profile-card') && !response.data.includes('timeline-item')) {
+        throw new Error('Invalid response format');
+      }
+      
       return response;
     } catch (error) {
       if (attempt === maxRetries - 1) throw error;
@@ -42,7 +49,7 @@ async function tryNitterInstances(username: string): Promise<string> {
       const response = await fetchWithRetry(`${instance}/${username}`);
       return response.data;
     } catch (error) {
-      errors.push(`${instance}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      console.error(`Failed to fetch from ${instance}:`, error);
       continue;
     }
   }
@@ -61,9 +68,10 @@ export async function scrapeTwitterProfile(username: string): Promise<ScrapeResu
 
     const html = await tryNitterInstances(cleanUsername);
     const $ = cheerio.load(html);
-
-    const name = $('.profile-card-fullname, .fullname').first().text().trim();
-    const bio = $('.profile-bio, .bio').first().text().trim();
+    
+    // Use multiple selectors to handle different Nitter instance variations
+    const name = $('.profile-card-fullname, .fullname, .profile-name').first().text().trim();
+    const bio = $('.profile-bio, .bio, .profile-description').first().text().trim();
     const followersText = $('.profile-stat-num, .followers .profile-stat-num').first().text().trim() || '0';
     const followingText = $('.profile-stat-num, .following .profile-stat-num').first().text().trim() || '0';
     
@@ -76,7 +84,7 @@ export async function scrapeTwitterProfile(username: string): Promise<ScrapeResu
     };
 
     const tweets: string[] = [];
-    $('.timeline-item .tweet-content, .tweet-content').each((_, elem) => {
+    $('.timeline-item .tweet-content, .tweet-content, .tweet-text').each((_, elem) => {
       const tweet = $(elem).text().trim();
       if (tweet && !tweet.startsWith('RT @')) tweets.push(tweet);
     });
@@ -84,14 +92,14 @@ export async function scrapeTwitterProfile(username: string): Promise<ScrapeResu
     if (!name) {
       return {
         success: false,
-        error: 'Twitter profile not found or is private'
+        error: 'Could not find Twitter profile. Please check the username and try again.'
       };
     }
 
     if (tweets.length === 0) {
       return {
         success: false,
-        error: 'No public tweets found. The profile might be private or temporarily unavailable.'
+        error: 'No tweets found. The profile might be private or temporarily unavailable.'
       };
     }
 
