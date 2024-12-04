@@ -1,48 +1,29 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import type { ScrapeResult, TwitterProfile } from '../types.js';
+import { setTimeout } from 'timers/promises';
 
-const NITTER_INSTANCES = [
-  'https://nitter.net',
-  'https://nitter.1d4.us',
-  'https://nitter.kavin.rocks',
-  'https://nitter.it',
-  'https://nitter.privacydev.net',
-  'https://nitter.projectsegfau.lt'
-];
-
-async function fetchWithTimeout(url: string, timeout = 8000) {
+async function fetchWithRetry(url: string, maxRetries = 3) {
   const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeout);
-  try {
-    const response = await axios.get(url, { 
-      signal: controller.signal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-      }
-    });
-    clearTimeout(id);
-    return response;
-  } catch (error) {
-    clearTimeout(id);
-    throw error;
-  }
-}
-
-async function tryNitterInstances(username: string) {
-  const errors: string[] = [];
-  for (const instance of NITTER_INSTANCES) {
+  
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
-      const url = `${instance}/${username}`;
-      const response = await fetchWithTimeout(url);
-      return response.data;
+      const response = await axios.get(url, {
+        signal: controller.signal,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'text/html',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+        timeout: 10000
+      });
+      return response;
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      errors.push(`${instance}: ${errorMessage}`);
-      continue;
+      if (attempt === maxRetries - 1) throw error;
+      await setTimeout(1000 * Math.pow(2, attempt)); // Exponential backoff
     }
   }
-  throw new Error(`Failed to fetch profile data from all instances. Details: ${errors.join(', ')}`);
+  throw new Error('Failed to fetch after max retries');
 }
 
 export async function scrapeTwitterProfile(username: string): Promise<ScrapeResult> {
@@ -55,15 +36,17 @@ export async function scrapeTwitterProfile(username: string): Promise<ScrapeResu
       };
     }
 
-    const html = await tryNitterInstances(cleanUsername);
+    const response = await fetchWithRetry(`https://nitter.net/${cleanUsername}`);
+    const html = response.data;
     const $ = cheerio.load(html);
 
-    const name = $('.profile-card-fullname').text().trim();
-    const bio = $('.profile-bio').text().trim();
-    const followersText = $('.profile-stat-num').eq(0).text().trim();
-    const followingText = $('.profile-stat-num').eq(1).text().trim();
+    const name = $('.profile-card-fullname, .fullname').first().text().trim();
+    const bio = $('.profile-bio, .bio').first().text().trim();
+    const followersText = $('.profile-stat-num, .followers .profile-stat-num').first().text().trim() || '0';
+    const followingText = $('.profile-stat-num, .following .profile-stat-num').first().text().trim() || '0';
     
     const convertCount = (count: string): number => {
+      if (!count || count === '0') return 0;
       const num = parseFloat(count.replace(/,/g, ''));
       if (count.endsWith('K')) return num * 1000;
       if (count.endsWith('M')) return num * 1000000;
@@ -71,7 +54,7 @@ export async function scrapeTwitterProfile(username: string): Promise<ScrapeResu
     };
 
     const tweets: string[] = [];
-    $('.tweet-content').each((_, elem) => {
+    $('.tweet-content, .timeline-item .tweet-content').each((_, elem) => {
       const tweet = $(elem).text().trim();
       if (tweet && !tweet.startsWith('RT @')) tweets.push(tweet);
     });
@@ -79,14 +62,14 @@ export async function scrapeTwitterProfile(username: string): Promise<ScrapeResu
     if (!name) {
       return {
         success: false,
-        error: 'Profile not found, is private, or has been suspended'
+        error: 'Profile not found or is private'
       };
     }
 
     if (tweets.length === 0) {
       return {
         success: false,
-        error: 'No tweets found. The profile might be private or temporarily unavailable.'
+        error: 'No public tweets found for this profile'
       };
     }
 
